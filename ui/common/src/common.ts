@@ -43,6 +43,15 @@ export const withEffect =
     return returnValue;
   };
 
+export const propWithDestroy = <A>(destructor: (value: A) => void, initialValue?: A): Prop<A | undefined> => {
+  let value = initialValue;
+  return function (v?: A) {
+    if (arguments.length === 0) return value;
+    if (value !== undefined && value !== v) destructor(value);
+    return (value = v);
+  };
+};
+
 export interface Toggle extends PropWithEffect<boolean> {
   toggle(): void;
   effect(value: boolean): void;

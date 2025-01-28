@@ -1,105 +1,65 @@
-import path from 'node:path';
+import p from 'node:path';
 import type { Package } from './parse.ts';
 import { unique, isEquivalent } from './algo.ts';
-import { type Manifest, updateManifest } from './manifest.ts';
+import { updateManifest } from './manifest.ts';
+import { watchOk } from './watch.ts';
 
-// state, logging, and exit code logic
-
-type Builder = 'sass' | 'tsc' | 'esbuild';
+// state, logging, and status logic
 
 export const env = new (class {
-  readonly rootDir = path.resolve(path.dirname(new URL(import.meta.url).pathname), '../../..');
-  readonly uiDir = path.join(this.rootDir, 'ui');
-  readonly outDir = path.join(this.rootDir, 'public');
-  readonly cssOutDir = path.join(this.outDir, 'css');
-  readonly jsOutDir = path.join(this.outDir, 'compiled');
-  readonly hashOutDir = path.join(this.outDir, 'hashed');
-  readonly themeDir = path.join(this.uiDir, 'common', 'css', 'theme');
-  readonly themeGenDir = path.join(this.themeDir, 'gen');
-  readonly buildDir = path.join(this.uiDir, '.build');
-  readonly cssTempDir = path.join(this.buildDir, 'build', 'css');
-  readonly buildSrcDir = path.join(this.uiDir, '.build', 'src');
-  readonly buildTempDir = path.join(this.buildDir, 'build');
-  readonly typesDir = path.join(this.uiDir, '@types');
-  readonly i18nSrcDir = path.join(this.rootDir, 'translation', 'source');
-  readonly i18nDestDir = path.join(this.rootDir, 'translation', 'dest');
-  readonly i18nJsDir = path.join(this.rootDir, 'translation', 'js');
+  readonly rootDir = p.resolve(p.dirname(new URL(import.meta.url).pathname), '../../..');
+  readonly uiDir = p.join(this.rootDir, 'ui');
+  readonly outDir = p.join(this.rootDir, 'public');
+  readonly cssOutDir = p.join(this.outDir, 'css');
+  readonly jsOutDir = p.join(this.outDir, 'compiled');
+  readonly hashOutDir = p.join(this.outDir, 'hashed');
+  readonly themeDir = p.join(this.uiDir, 'common', 'css', 'theme');
+  readonly themeGenDir = p.join(this.themeDir, 'gen');
+  readonly buildDir = p.join(this.uiDir, '.build');
+  readonly cssTempDir = p.join(this.buildDir, 'build', 'css');
+  readonly buildSrcDir = p.join(this.uiDir, '.build', 'src');
+  readonly buildTempDir = p.join(this.buildDir, 'build');
+  readonly typesDir = p.join(this.uiDir, '@types');
+  readonly i18nSrcDir = p.join(this.rootDir, 'translation', 'source');
+  readonly i18nDestDir = p.join(this.rootDir, 'translation', 'dest');
+  readonly i18nJsDir = p.join(this.rootDir, 'translation', 'js');
 
   watch = false;
   clean = false;
   prod = false;
   debug = false;
-  remoteLog: string | boolean = false;
   rgb = false;
-  install = true;
-  sync = true;
-  i18n = true;
   test = false;
-  exitCode: Map<Builder, number | false> = new Map();
-  startTime: number | undefined = Date.now();
+  install = true;
   logTime = true;
   logCtx = true;
   logColor = true;
+  remoteLog: string | boolean = false;
+  startTime: number | undefined = Date.now();
 
   packages: Map<string, Package> = new Map();
   workspaceDeps: Map<string, string[]> = new Map();
   building: Package[] = [];
-  manifest: { js: Manifest; i18n: Manifest; css: Manifest; hashed: Manifest; dirty: boolean } = {
-    i18n: {},
-    js: {},
-    css: {},
-    hashed: {},
-    dirty: false,
-  };
 
-  get sass(): boolean {
-    return this.exitCode.get('sass') !== false;
-  }
+  private status: { [key in Context]?: number | false } = {};
 
-  get tsc(): boolean {
-    return this.exitCode.get('tsc') !== false;
-  }
-
-  get esbuild(): boolean {
-    return this.exitCode.get('esbuild') !== false;
-  }
-
-  get manifestOk(): boolean {
+  get buildersOk(): boolean {
     return (
       isEquivalent(this.building, [...this.packages.values()]) &&
-      this.sync &&
-      this.i18n &&
-      (['tsc', 'esbuild', 'sass'] as const).every(x => this.exitCode.get(x) === 0)
+      (['tsc', 'esbuild', 'sass', 'i18n'] as const).map(b => this.status[b]).every(x => x === 0)
     );
   }
 
   get manifestFile(): string {
-    return path.join(this.jsOutDir, `manifest.${this.prod ? 'prod' : 'dev'}.json`);
+    return p.join(this.jsOutDir, `manifest.${this.prod ? 'prod' : 'dev'}.json`);
   }
 
-  transitiveDeps(pkgName: string): Package[] {
+  deps(pkgName: string): Package[] {
     const depList = (dep: string): string[] => [
       ...(this.workspaceDeps.get(dep) ?? []).flatMap(d => depList(d)),
       dep,
     ];
     return unique(depList(pkgName).map(name => this.packages.get(name)));
-  }
-
-  warn(d: any, ctx = 'build'): void {
-    this.log(d, { ctx: ctx, warn: true });
-  }
-
-  error(d: any, ctx = 'build'): void {
-    this.log(d, { ctx: ctx, error: true });
-  }
-
-  exit(d: any, ctx = 'build'): void {
-    this.log(d, { ctx: ctx, error: true });
-    process.exit(1);
-  }
-
-  good(ctx = 'build'): void {
-    this.log(c.good('No errors') + this.watch ? ` - ${c.grey('Watching')}...` : '', { ctx: ctx });
   }
 
   log(d: any, { ctx = 'build', error = false, warn = false }: any = {}): void {
@@ -121,25 +81,50 @@ export const env = new (class {
     );
   }
 
-  done(code: number, ctx: Builder): void {
-    this.exitCode.set(ctx, code);
-    const err = [...this.exitCode.values()].find(x => x);
-    const allDone = this.exitCode.size === 3;
-    if (ctx !== 'tsc' || code === 0)
+  warn(d: any, ctx = 'build'): void {
+    this.log(d, { ctx: ctx, warn: true });
+  }
+
+  error(d: any, ctx = 'build'): void {
+    this.log(d, { ctx: ctx, error: true });
+  }
+
+  exit(d: any, ctx = 'build'): void {
+    this.log(d, { ctx: ctx, error: true });
+    process.exit(1);
+  }
+
+  good(ctx = 'build'): void {
+    this.log(c.good('No errors') + this.watch ? ` - ${c.grey('Watching')}...` : '', { ctx: ctx });
+  }
+
+  begin(ctx: Context, enable?: boolean): boolean {
+    if (enable === false) this.status[ctx] = false;
+    else if (enable === true || this.status[ctx] !== false) this.status[ctx] = undefined;
+    return this.status[ctx] !== false;
+  }
+
+  done(ctx: Context, code: number = 0): void {
+    if (code !== this.status[ctx]) {
       this.log(
         `${code === 0 ? 'Done' : c.red('Failed')}` + (this.watch ? ` - ${c.grey('Watching')}...` : ''),
         { ctx },
       );
-    if (allDone) {
-      if (this.startTime && !err) this.log(`Done in ${c.green((Date.now() - this.startTime) / 1000 + '')}s`);
-      this.startTime = undefined; // it's pointless to time subsequent builds, they are too fast
     }
-    if (!this.watch && err) process.exitCode = err;
-    if (!err) updateManifest();
+    this.status[ctx] = code;
+    if (this.buildersOk && watchOk()) {
+      if (this.startTime) this.log(`Done in ${c.green((Date.now() - this.startTime) / 1000 + '')}s`);
+      this.startTime = undefined;
+      updateManifest();
+    }
+    //if (!this.watch) process.exitCode = Object.values(this.status).find(x => x) || 0;
+    if (!this.watch && code) process.exit(code);
   }
 })();
 
 export const lines = (s: string): string[] => s.split(/[\n\r\f]+/).filter(x => x.trim());
+
+type Context = 'sass' | 'tsc' | 'esbuild' | 'sync' | 'i18n';
 
 const escape = (text: string, code?: string): string =>
   env.logColor && code ? `\x1b[${code}m${stripColorEscapes(text)}\x1b[0m` : text;
@@ -186,6 +171,10 @@ const colorForCtx = (ctx: string): string =>
     sass: codes.magenta,
     tsc: codes.yellow,
     esbuild: codes.blue,
+    // inline: codes.blue,
+    // sync: codes.cyan,
+    // hash: codes.cyan,
+    i18n: codes.cyan,
   })[ctx] ?? codes.grey;
 
 const pad2 = (n: number) => (n < 10 ? `0${n}` : `${n}`);

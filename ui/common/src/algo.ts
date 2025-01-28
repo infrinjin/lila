@@ -47,6 +47,22 @@ export function isEquivalent(a: any, b: any): boolean {
   return true;
 }
 
+// if a recursive merge of sub into a would result in no change (structural containment), return true
+export function isContained(a: any, sub: any): boolean {
+  if (a === sub) return true;
+  if (typeof a !== typeof sub) return false;
+  if (Array.isArray(a)) {
+    return Array.isArray(sub) && a.length === sub.length && a.every((x, i) => isEquivalent(x, sub[i]));
+  }
+  if (typeof a !== 'object') return false;
+  const [aKeys, subKeys] = [Object.keys(a), Object.keys(sub)];
+  if (aKeys.length < subKeys.length) return false;
+  for (const key of subKeys) {
+    if (!aKeys.includes(key) || !isContained(a[key], sub[key])) return false;
+  }
+  return true;
+}
+
 export function zip<T, U>(arr1: T[], arr2: U[]): [T, U][] {
   const length = Math.min(arr1.length, arr2.length);
   const result: [T, U][] = [];

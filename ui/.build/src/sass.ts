@@ -1,11 +1,11 @@
 import cps from 'node:child_process';
 import fs from 'node:fs';
 import ps from 'node:process';
-import path from 'node:path';
+import p from 'node:path';
 import crypto from 'node:crypto';
 import clr from 'tinycolor2';
 import { env, c, lines, errorMark } from './env.ts';
-import { globArray, readable } from './parse.ts';
+import { readable, glob } from './parse.ts';
 import { updateManifest } from './manifest.ts';
 import { clamp } from './algo.ts';
 
@@ -30,10 +30,9 @@ export function stopSass(): void {
 }
 
 export async function sass(): Promise<void> {
-  if (!env.sass) return;
-  env.exitCode.delete('sass');
+  if (!env.begin('sass')) return;
 
-  await fs.promises.mkdir(path.join(env.buildTempDir, 'css')).catch(() => {});
+  await fs.promises.mkdir(p.join(env.buildTempDir, 'css')).catch(() => {});
 
   awaitingFullBuild ??= env.watch && env.building.length === env.packages.size;
 
@@ -45,18 +44,16 @@ export async function sass(): Promise<void> {
 
   compile(sources, env.building.length !== env.packages.size);
 
-  if (!sources.length) env.done(0, 'sass');
+  if (!sources.length) env.done('sass');
 }
 
 export async function allSources(): Promise<string[]> {
-  return (await globArray('./*/css/**/[^_]*.scss', { absolute: false })).filter(x => !x.includes('/gen/'));
+  return (await glob('./*/css/**/[^_]*.scss', { absolute: false })).filter(x => !x.includes('/gen/'));
 }
 
 async function unbuiltSources(): Promise<string[]> {
   return Promise.all(
-    (await allSources()).filter(
-      src => !readable(path.join(env.cssTempDir, `${path.basename(src, '.scss')}.css`)),
-    ),
+    (await allSources()).filter(src => !readable(p.join(env.cssTempDir, `${p.basename(src, '.scss')}.css`))),
   );
 }
 
@@ -72,8 +69,8 @@ class SassWatch {
 
   async watch() {
     if (!env.watch) return;
-    const watchDirs = new Set<string>([...importMap.keys()].map(path.dirname));
-    (await allSources()).forEach(s => watchDirs.add(path.dirname(s)));
+    const watchDirs = new Set<string>([...importMap.keys()].map(p.dirname));
+    (await allSources()).forEach(s => watchDirs.add(p.dirname(s)));
     if (this.watchDirs.size === watchDirs.size || [...watchDirs].every(d => this.watchDirs.has(d))) return;
     if (this.watchDirs.size) env.log('Rebuilding watchers...', { ctx: 'sass' });
     for (const x of this.watchers) x.close();
@@ -106,7 +103,7 @@ class SassWatch {
     if (files.every(f => this.touched.has(f))) return false;
     files.forEach(src => {
       this.touched.add(src);
-      if (!/[^_].*\.scss/.test(path.basename(src))) {
+      if (!/[^_].*\.scss/.test(p.basename(src))) {
         this.dependencies.add(src);
       } else importersOf(src).forEach(dest => this.dependencies.add(dest));
     });
@@ -115,10 +112,10 @@ class SassWatch {
 
   onChange(dir: string, event: string, srcFile: string) {
     if (event === 'change') {
-      if (this.add([path.join(dir, srcFile)])) env.log(`File '${c.cyanBold(srcFile)}' changed`);
+      if (this.add([p.join(dir, srcFile)])) env.log(`File '${c.cyanBold(srcFile)}' changed`);
     } else if (event === 'rename') {
-      globArray('*.scss', { cwd: dir, absolute: false }).then(files => {
-        if (this.add(files.map(f => path.join(dir, f)))) {
+      glob('*.scss', { cwd: dir, absolute: false }).then(files => {
+        if (this.add(files.map(f => p.join(dir, f)))) {
           env.log(`Cross your fingers - directory '${c.cyanBold(dir)}' changed`, { ctx: 'sass' });
         }
       });
@@ -151,19 +148,19 @@ class SassWatch {
   }
 }
 
-// compile an array of concrete scss files to ui/.build/dist/css/*.css (css temp dir prior to hashMove)
+// compile an array of concrete scss files to ui/.build/build/css/*.css (prior to hashMove)
 function compile(sources: string[], logAll = true) {
   if (!sources.length) return sources.length;
 
   const sassExec =
     process.env.SASS_PATH ||
     fs.realpathSync(
-      path.join(env.buildDir, 'node_modules', `sass-embedded-${ps.platform}-${ps.arch}`, 'dart-sass', 'sass'),
+      p.join(env.buildDir, 'node_modules', `sass-embedded-${ps.platform}-${ps.arch}`, 'dart-sass', 'sass'),
     );
 
   if (!fs.existsSync(sassExec)) {
     env.error(`Sass executable not found '${c.cyan(sassExec)}'`, 'sass');
-    env.done(1, 'sass');
+    env.done('sass', -1);
   }
   if (logAll) sources.forEach(src => env.log(`Building '${c.cyan(src)}'`, { ctx: 'sass' }));
   else env.log('Building', { ctx: 'sass' });
@@ -175,8 +172,7 @@ function compile(sources: string[], logAll = true) {
     sassArgs.concat(
       env.prod ? ['--style=compressed', '--no-source-map'] : ['--embed-sources'],
       sources.map(
-        (src: string) =>
-          `${src}:${path.join(env.cssTempDir, path.basename(src).replace(/(.*)scss$/, '$1css'))}`,
+        (src: string) => `${src}:${p.join(env.cssTempDir, p.basename(src).replace(/(.*)scss$/, '$1css'))}`,
       ),
     ),
   );
@@ -187,18 +183,18 @@ function compile(sources: string[], logAll = true) {
     for (const txt of txts) env.log(c.red(txt), { ctx: 'sass' });
   });
   sassPs.on('close', async (code: number) => {
-    if (code !== 0) return env.done(code, 'sass');
+    if (code !== 0) return env.done('sass', code);
     if (awaitingFullBuild && compile(await unbuiltSources()) > 0) return;
     awaitingFullBuild = false; // now we are ready to make manifests
     cssManifest();
-    env.done(0, 'sass');
+    env.done('sass');
   });
   return sources.length;
 }
 
 // recursively parse scss file and its imports to build dependency and color maps
 async function parseScss(src: string) {
-  if (path.dirname(src).endsWith('/gen')) return;
+  if (p.dirname(src).endsWith('/gen')) return;
   if (processed.has(src)) return;
   processed.add(src);
   try {
@@ -216,9 +212,9 @@ async function parseScss(src: string) {
     for (const match of text.matchAll(/^@(?:import|use)\s+['"](.*)['"]/gm)) {
       if (match.length !== 2) continue;
 
-      const absDep = (await readable(path.resolve(path.dirname(src), match[1]) + '.scss'))
-        ? path.resolve(path.dirname(src), match[1] + '.scss')
-        : path.resolve(path.dirname(src), resolvePartial(match[1]));
+      const absDep = (await readable(p.resolve(p.dirname(src), match[1]) + '.scss'))
+        ? p.resolve(p.dirname(src), match[1] + '.scss')
+        : p.resolve(p.dirname(src), resolvePartial(match[1]));
 
       if (!absDep.startsWith(env.uiDir) || /node_modules.*\.css/.test(absDep)) continue;
 
@@ -233,7 +229,7 @@ async function parseScss(src: string) {
 
 // collect mixable scss color definitions from theme files
 async function parseThemeColorDefs() {
-  const themeFiles = await globArray('./common/css/theme/_*.scss', { absolute: false });
+  const themeFiles = await glob('./common/css/theme/_*.scss', { absolute: false });
   const themes: string[] = ['dark'];
   const capturedColors = new Map<string, string>();
   for (const themeFile of themeFiles ?? []) {
@@ -274,7 +270,7 @@ async function parseThemeColorDefs() {
 
 // given color definitions and mix instructions, build mixed color css variables in themed scss mixins
 async function buildColorMixes() {
-  const out = fs.createWriteStream(path.join(env.themeGenDir, '_mix.scss'));
+  const out = fs.createWriteStream(p.join(env.themeGenDir, '_mix.scss'));
   for (const theme of themeColorMap.keys()) {
     const colorMap = themeColorMap.get(theme)!;
     out.write(`@mixin ${theme}-mix {\n`);
@@ -307,7 +303,7 @@ async function buildColorWrap() {
   const cssVars = new Set<string>();
   for (const color of colorMixMap.keys()) cssVars.add(`m-${color}`);
 
-  for (const file of await globArray(path.join(env.themeDir, '_*.scss'))) {
+  for (const file of await glob(p.join(env.themeDir, '_*.scss'))) {
     for (const line of (await fs.promises.readFile(file, 'utf8')).split('\n')) {
       if (line.indexOf('--') === -1) continue;
       const commentIndex = line.indexOf('//');
@@ -322,8 +318,8 @@ async function buildColorWrap() {
       .map(variable => `$${variable}: var(--${variable});`)
       .join('\n') + '\n';
 
-  const wrapFile = path.join(env.themeDir, 'gen', '_wrap.scss');
-  await fs.promises.mkdir(path.dirname(wrapFile), { recursive: true });
+  const wrapFile = p.join(env.themeDir, 'gen', '_wrap.scss');
+  await fs.promises.mkdir(p.dirname(wrapFile), { recursive: true });
   if (await readable(wrapFile)) {
     if ((await fs.promises.readFile(wrapFile, 'utf8')) === scssWrap) return; // don't touch wrap if no changes
   }
@@ -346,7 +342,7 @@ function parseColor(colorMix: string) {
 }
 
 function resolvePartial(partial: string): string {
-  const nameBegin = partial.lastIndexOf(path.sep) + 1;
+  const nameBegin = partial.lastIndexOf(p.sep) + 1;
   return `${partial.slice(0, nameBegin)}_${partial.slice(nameBegin)}.scss`;
 }
 
@@ -367,17 +363,17 @@ function importersOf(srcFile: string, bset = new Set<string>()): Set<string> {
 }
 
 export async function cssManifest(): Promise<void> {
-  const files = await globArray(path.join(env.cssTempDir, '*.css'));
+  const files = await glob(p.join(env.cssTempDir, '*.css'));
   updateManifest({ css: Object.fromEntries(await Promise.all(files.map(hashMoveCss))) });
 }
 
 async function hashMoveCss(src: string) {
   const content = await fs.promises.readFile(src, 'utf-8');
   const hash = crypto.createHash('sha256').update(content).digest('hex').slice(0, 8);
-  const basename = path.basename(src, '.css');
+  const basename = p.basename(src, '.css');
   await Promise.allSettled([
-    env.prod ? undefined : fs.promises.rename(`${src}.map`, path.join(env.cssOutDir, `${basename}.css.map`)),
-    fs.promises.rename(src, path.join(env.cssOutDir, `${basename}.${hash}.css`)),
+    env.prod ? undefined : fs.promises.rename(`${src}.map`, p.join(env.cssOutDir, `${basename}.css.map`)),
+    fs.promises.rename(src, p.join(env.cssOutDir, `${basename}.${hash}.css`)),
   ]);
-  return [path.basename(src, '.css'), { hash }];
+  return [p.basename(src, '.css'), { hash }];
 }
